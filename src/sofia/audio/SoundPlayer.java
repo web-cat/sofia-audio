@@ -1,282 +1,374 @@
 package sofia.audio;
 
 import java.io.IOException;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Timer;
-import java.util.TimerTask;
 
+import sofia.app.internal.LifecycleInjection;
+import sofia.app.internal.ScreenMixin;
 import android.content.Context;
 import android.content.res.AssetFileDescriptor;
 import android.content.res.AssetManager;
 import android.media.AudioManager;
 import android.media.SoundPool;
-import android.media.SoundPool.OnLoadCompleteListener;
 import android.os.SystemClock;
-import android.util.Log;
+import android.util.SparseIntArray;
 
+//-------------------------------------------------------------------------
 /**
- * Class that provides a simple API for playing sounds in an android project. 
- * @author bellen08
- *
+ * This class provides a simple interface for playing basic sounds (such as
+ * notification chimes or game play effects) in a Sofia application.
+ *  
+ * @author  Ellen Boyd, Tony Allevato
+ * @version 2012.11.01
  */
 public class SoundPlayer 
 {
-	public String TAG = "SoundPlayer:";
-	private static final int DEFAULT_LOOP = 0;
+	//~ Fields ................................................................
+
+	private static final int LOOP_INDEFINITELY = -1;
 	private static final float DEFAULT_RATE = 1.0f;
 	
-	private HashMap<String, Integer> soundMap;
+	private static final String[] ASSET_EXTENSIONS = {
+		".ogg", ".OGG", ".mp3", ".MP3", ".wav", ".WAV"
+	};
 	
-	//maps soundIds to streamIds
-	private HashMap<Integer, Integer> streamIds;
-	
-	private SoundPool soundPool;
 	private Context context;
+	private SoundPool soundPool;
+
+	// A cache that maps sound names to their sound pool integer IDs, so that
+	// sounds can always be referred to by name for simplicity.
+	private HashMap<String, Integer> soundNamesToPoolIds;
 	
+	// Maps sound pool IDs to currently playing stream IDs.
+	private SparseIntArray poolIdsToStreamIds;
+
+
 	//~ Constructors ..........................................................
 
     // ----------------------------------------------------------
 	/**
-	 * Creates a new SoundPlayer with given context
-	 * @param context
+	 * Creates a new SoundPlayer with given context (which is an activity or
+	 * screen).
+	 * 
+	 * @param context the context
 	 */
 	public SoundPlayer(Context context) 
 	{
 		this.context = context;
-		soundMap = new HashMap<String, Integer>();
+		
+		soundNamesToPoolIds = new HashMap<String, Integer>();
 		soundPool = new SoundPool(1, AudioManager.STREAM_MUSIC, 0);
-		streamIds = new HashMap<Integer, Integer>();
+		poolIdsToStreamIds = new SparseIntArray();
+		
+		ScreenMixin mixin = ScreenMixin.getMixin(context);
+		if (mixin != null)
+		{
+			mixin.addLifecycleInjection(injection);
+		}		
 	}
 	
-	
-    // ----------------------------------------------------------
-	/**
-	 * Method specifying a sound to loop infinitely.
-	 * @param sound the sound to repeat
-	 */
-	public void playOnRepeat(String sound)
-	{
-		play(sound, -1);
-	}
-	
-	
-	//public void load_resources
+
+	//~ Methods ...............................................................
 
     // ----------------------------------------------------------
 	/**
-	 * Method specifying the sound to play, doesn't loop by default.
-	 * @param sound
+	 * Plays the sound with the specified name once.
+	 * 
+	 * @param name the name of the sound to play
 	 */
-	public int play(String sound)
+	public void play(String name)
 	{
-		return play(sound, DEFAULT_LOOP);		
+		play(name, 0);		
 	}
+	
+
+    // ----------------------------------------------------------
+	/**
+	 * Plays the sound with the specified name, repeating it a given number of
+	 * times.
+	 * 
+	 * @param name the name of the sound to play
+	 * @param loopCount the number of times to repeat the sound
+	 */
+	public void play(String name, int loopCount) 
+	{
+		if (!isLoaded(name))
+		{
+			loadSound(name);
+		}
+
+		int soundId = soundNamesToPoolIds.get(name);
+		int stream = playHelper(soundId, loopCount);
+		poolIdsToStreamIds.put(soundId, stream);
+	}
+
+
+    // ----------------------------------------------------------
+	/**
+	 * Plays the sound with the specified name, repeating it forever (until a
+	 * method such as {@link #pause(String)} or {@link #stop(String)} is
+	 * called).
+	 * 
+	 * @param name the name of the sound to play
+	 */
+	public void playForever(String name)
+	{
+		play(name, LOOP_INDEFINITELY);
+	}
+	
 	
     // ----------------------------------------------------------
 	/**
-	 * Overloaded play specifying the number of times to loop the sound
-	 * @param sound
-	 * @param loopCount
-	 * @throws IllegalArgumentException 
+	 * Stops the sound with the specified name, if it is currently playing. If
+	 * the sound is not currently playing, nothing happens.
+	 * 
+	 * @param name the name of the sound to stop
 	 */
-	public int play(String sound, int loopCount) 
+	public void stop(String name)
 	{
-		if (!isLoaded(sound))
-			loadSound(sound);
-		int soundid = soundMap.get(sound);
-		int stream = playHelper(soundid, loopCount);
-		streamIds.put(soundid, stream);
-		return stream;
+		if (soundNamesToPoolIds.containsKey(name))
+		{
+			soundPool.stop(
+					poolIdsToStreamIds.get(soundNamesToPoolIds.get(name)));
+		}
 	}
 	
+
+	// ----------------------------------------------------------
+	/**
+	 * Resumes the sound with the specified name, if it is paused. If the sound
+	 * is not paused (or was never loaded), nothing happens.
+	 * 
+	 * @param name the name of the sound to resume
+	 */
+	public void resume(String name)
+	{
+		if (soundNamesToPoolIds.containsKey(name))
+		{
+			soundPool.resume(
+					poolIdsToStreamIds.get(soundNamesToPoolIds.get(name)));
+		}
+	}
+	
+
     // ----------------------------------------------------------
 	/**
-	 * Stops the current stream from playing 
+	 * Pauses the sound with the specified name, if it is playing. If the sound
+	 * is not playing, nothing happens.
+	 * 
+	 * @param name the name of the sound to pause
 	 */
-	public void stop(String sound)
+	public void pause(String name)
 	{
-		if (soundMap.containsKey(sound))
-			soundPool.stop(streamIds.get(soundMap.get(sound)));
+		if (soundNamesToPoolIds.containsKey(name))
+		{
+			soundPool.pause(
+					poolIdsToStreamIds.get(soundNamesToPoolIds.get(name)));
+		}
 	}
+
 	
-	
-    // ----------------------------------------------------------
+	// ----------------------------------------------------------
 	/**
-	 * Pauses the given file if it's playing, else ignores
-	 * @return
+	 * Pauses all currently playing sounds. Call {@link #resumeAll()} to start
+	 * them again where they left off.
 	 */
-	public void pause(String sound)
-	{
-		if (soundMap.containsKey(sound))
-			soundPool.pause(streamIds.get(soundMap.get(sound)));
-		Log.i(TAG, "pause called on sound: " + sound);
-	}
-	
-	public void pauseAllSounds()
+	public void pauseAll()
 	{
 		soundPool.autoPause();
 	}
-	
+
+
+	// ----------------------------------------------------------
 	/**
-	 * Resumes playing the sound, assuming the sound:
+	 * Resumes all sounds that were playing when {@link #pauseAll()} was
+	 * called.
+	 */
+	public void resumeAll()
+	{
+		soundPool.autoResume();
+	}
+
+
+	// ----------------------------------------------------------
+	/**
+	 * Attempts to load the sound file with the given name by first checking
+	 * for a resource with the matching name in res/raw, and if it is not found
+	 * there then it is looked up in the assets/sounds folder.
 	 * 
-	 * A.exists
-	 * B.currently paused
-	 * @param sound
-	 */
-	public void resume(String sound)
-	{
-		if (soundMap.containsKey(sound))
-			soundPool.resume(streamIds.get(soundMap.get(sound)));
-	}
-	
-    // ----------------------------------------------------------
-	/**
-	 * Returns the mapping of sound file names to their
-	 * unique soundId -- mostly for testing purposes.
+	 * @param name the name of the sound file, without the file extension
 	 * 
-	 * ****To do: remove***
-	 * @return
+	 * @throws IllegalArgumentException if a sound with the given name cannot
+	 *     be located
 	 */
-	public HashMap<String, Integer> getSoundMap()
+	public void loadSound(String name)
 	{
-		return soundMap;
-	}
-	
-    // ----------------------------------------------------------
-	/**
-	 * Returns the mapping soundIds to streamId
-	 * 
-	 * ****To do: remove***
-	 * @return
-	 */
-	public HashMap<Integer, Integer> getStreamMap()
-	{
-		return streamIds;
-	}
-	
-    // ----------------------------------------------------------
-	/**
-	 * Currently being called in the onDestroy method, 
-	 * releases all memory associated with given pool.
-	 */
-	public void clear()
-	{
-		soundPool.release();
-	}
-	
-	//public pauseAll
-    // ----------------------------------------------------------
-	/**
-	 * Attempts to load the sound file with the given name by first checking for the file
-	 * in R.raw, then in the assets/sounds folder.
-	 * @param filename name of the sound file
-	 * @throws IllegalArgumentException if a sound_file with given name cannot be located
-	 */
-	public void loadSound(String filename) throws IllegalArgumentException
-	{
-		boolean didLoad = addSoundFromResources(filename) || addSoundFromAssets(filename);
+		boolean didLoad =
+				loadSoundFromResources(name) || loadSoundFromAssets(name);
+
 		if (!didLoad)
-			throw new IllegalArgumentException("Could not find specified sound resource.");
+		{
+			throw new IllegalArgumentException(
+					"Could not find an audio file named \"" + name +
+					"\" in assets or in res/raw.");
+		}
 	}
-	
+
+
     // ----------------------------------------------------------
 	/**
-	 * Attempts to load a sound file from resources (in R.raw sub folder)
-	 * @param sound the soundfile name (no extension)
-	 * @return true if succesfully loaded
+	 * Attempts to load a sound from a resource stored in the res/raw folder.
+	 * 
+	 * @param name the name of the sound file, without the file extension
+	 * @return true if the sound was found and loaded successfully
 	 */
-	private boolean addSoundFromResources(String sound)
+	private boolean loadSoundFromResources(String name)
 	{
-		int res_id = context.getResources().getIdentifier(sound, "raw", context.getPackageName());
-		if (res_id != 0)
+		int resId = context.getResources().getIdentifier(
+				name, "raw", context.getPackageName());
+
+		if (resId != 0)
 		{
-			int id = soundPool.load(context, res_id, 1);
-			soundMap.put(sound, id);
-			Log.i("addSoundFromResources", "successfully added " + sound + " from R.raw.");
+			int soundId = soundPool.load(context, resId, 1);
+			soundNamesToPoolIds.put(name, soundId);
+
 			return true;
 		}
-		else return false;
+		else
+		{
+			return false;
+		}
 	}
-	
+
+
     // ----------------------------------------------------------
 	/**
-	 * Attempts to load a sound file from the assets folder (under sounds/ directory)
-	 * Returns indication of load success
-	 * @param sound filename	
-	 * @return true if successfully loaded from assets/sounds/
+	 * Attempts to load a sound from a resource stored in the assets/sounds
+	 * folder.
+	 * 
+	 * @param name the name of the sound file, without the file extension
+	 * @return true if the sound was found and loaded successfully
 	 */
-	private boolean addSoundFromAssets(String sound)
+	private boolean loadSoundFromAssets(String name)
 	{
 		AssetManager assets = context.getAssets();
-		AssetFileDescriptor assetDescriptor;
-		try{
-			assetDescriptor = assets.openFd("sounds" + "/" + sound);
-			int soundId = soundPool.load(assetDescriptor, 1);
-			soundMap.put(sound, soundId);
-			Log.i("addSoundFromAssets", "successfully added " + sound + " from assets/sounds.");
-		}catch(IOException e){
-			return false;}	
-		return true;
+		AssetFileDescriptor fd = null;
+
+		for (String extension : ASSET_EXTENSIONS)
+		{
+			try
+			{
+				fd = assets.openFd("sounds/" + name + extension);
+			}
+			catch (IOException e)
+			{
+				// Do nothing.
+			}
+		}
+		
+		if (fd != null)
+		{
+			int soundId = soundPool.load(fd, 1);
+			soundNamesToPoolIds.put(name, soundId);
+
+			try
+			{
+				fd.close();
+			}
+			catch (IOException e)
+			{
+				// Do nothing.
+			}
+
+			return true;
+		}
+		else
+		{
+			return false;
+		}
 	}
-	
+
+
     // ----------------------------------------------------------
 	/**
-	 * Helper method that plays the given sound a certain amount of times as specified
-	 * by the caller.
+	 * Helper method that plays the given sound a certain amount of times as
+	 * specified by the caller.
+	 * 
 	 * @param soundId unique sound id
 	 * @param loopCount number of times to repeat the sound
 	 */
 	private int playHelper(int soundId, int loopCount)
 	{
+		// FIXME We need to replace this with a background thread that uses
+		// the sound pool's load-listener to wait for a sound to be loaded
+		// before it is played.
+
 		int streamId = 0;
 		int waitLimit = 1000;
 		int waitCounter = 0;
 		int throttle = 10;
+		
 		do
 		{
 			streamId = soundPool.play(soundId, 0.5f, 0.5f, 
 					1, loopCount, DEFAULT_RATE);
 			waitCounter ++;
 			SystemClock.sleep(throttle);
-		}while(streamId == 0 && waitCounter < waitLimit);
+		} while(streamId == 0 && waitCounter < waitLimit);
+		
 		if (streamId == 0)
+		{
 			throw new RuntimeException("Failed to load sound file.");
+		}
+
 		return streamId;
 	}
 
+
     // ----------------------------------------------------------
 	/**
-	 * Helper method determining whether or not a sound file has been loaded
-	 * to the pool
-	 * @param soundName
-	 * @return
+	 * Returns true if a sound with the specified name has been loaded into the
+	 * sound pool.
+	 * 
+	 * @param name the name of the sound
+	 * @return true if the specified sound has been loaded, otherwise false
 	 */
-	private boolean isLoaded(String soundName)
+	private boolean isLoaded(String name)
 	{
-		return soundMap.containsKey(soundName);
+		return soundNamesToPoolIds.containsKey(name);
 	}
 	
+	
+	//~ Inner classes .........................................................
 
-
-	public String toString()
+	// ----------------------------------------------------------
+	/**
+	 * This object is injected into the owning screen's lifecycle so that
+	 * sounds will be automatically stopped when the screen is paused.
+	 */
+	private final LifecycleInjection injection = new LifecycleInjection()
 	{
-		String out = "Total number of sound files loaded: " + soundMap.size() + "\n";
-		out += "-------------------------------------------------------------------\n";
-		
-		Iterator<Entry<String, Integer>> it = soundMap.entrySet().iterator();
-		while (it.hasNext())
+		// ----------------------------------------------------------
+		@Override
+		public void pause()
 		{
-			Map.Entry nameId = (Map.Entry)it.next();
-			out += "soundfile: " + nameId.getKey() + "     soundId: " + nameId.getValue() + "     streamId: " + streamIds.get(nameId.getValue()) + "\n";
+			pauseAll();
 		}
-		out += "-------------------------------------------------------------------\n";
-		return out;
-	}
 
-	
+		
+		// ----------------------------------------------------------
+		@Override
+		public void resume()
+		{
+			resumeAll();
+		}
+
+		
+		// ----------------------------------------------------------
+		@Override
+		public void destroy()
+		{
+			soundPool.release();
+		}
+	};
 }
